@@ -1,0 +1,338 @@
+# LASTZ Alignment
+```{bash}
+# Initialise Conda
+source ~/.bashrc
+conda init
+
+# Specify WD for Files
+cd /Users/matthewfraser/Desktop/Matthew_data/Sequence_Alignment/Example_Data
+
+# If needed, use SAMtools to extract different sequences into own fasta
+# samtools faidx .fasta "" > .fasta
+
+# If needed, use seqtk to convert the existing fasta into the reverse complement
+# seqtk seq -r .fasta > .fasta
+
+# Use cat command to combine multiple fasta files into a single new fasta for alignment
+# cat .fasta .fasta > .fasta
+
+# Create a path to the FASTA file
+fasta_file="ANNOTATED_SANCTUARY.fasta"
+
+# Run lastz and output with useful fields
+# Re-name .txt file
+# Note most important setting is to report start2+ and end2+ which reports alignments on plus strand. This is REQUIRED for correct plotting of hits on the minus strand by gggenomes()
+echo "Starting lastz alignment"
+lastz ${fasta_file}[multiple] ${fasta_file}[multiple] --gapped --step=20 --seed=12of19 --output=ANNOTATED_SANCTUARY.txt --hspthresh=3000 --format=general:name1,strand1,start1,end1,length1,name2,strand2,start2+,end2+,length2,identity
+
+```
+
+
+```{r}
+# Load required R Libraries
+library(gggenomes)
+library(ggplot2)
+library(tidyverse)
+library(ggnewscale)
+library(dplyr)
+
+# Specify WD for Files, Ensure Same As Before
+setwd("/Users/matthewfraser/Desktop/Matthew_data/Sequence_Alignment/Example_Data")
+
+# Load LASTZ output; assuming it's a tab-delimited file with appropriate headers
+# Re-name .txt File
+lastz_output <-read.delim("/Users/matthewfraser/Desktop/Matthew_data/Sequence_Alignment/Example_Data/ANNOTATED_SANCTUARY.txt", comment.char = "#", header = FALSE)
+
+# Define column names based on your LASTZ output format
+colnames(lastz_output) <- c("name1","strand1","start1","end1","length1","name2","strand2","start2","end2","length2","cov","identity")
+
+# filter out alignments less than 3000bp for clarity
+lastz_output <-filter(lastz_output, length1>=2000)%>%
+    mutate(identity = as.numeric(str_replace(identity, "%", "")))
+
+# Convert to a DataFrame compatible with gggenomes
+# Assuming you want to visualize links between name1 and name2
+lzlinks <- lastz_output %>%
+  transmute(
+    seq_id = name1,
+    start = start1,
+    end = end1,
+    seq_id2 = name2,
+    start2 = start2,
+    end2 = end2,
+    strand = strand2,  
+    perc_id = identity # Including the % identity column
+    ) 
+
+# Filter lzlinks so that it only features links >70% identity
+filt_lzlinks <- lzlinks %>%
+  filter(perc_id >70)
+view(filt_lzlinks)
+
+# If Alignment Involves GFF files (Eg. for Gene Annotations), processes and filters data into dataframe for use in sequence alignment
+filelist<-list.files(pattern = "\\.gff")
+gfflist <-lapply(filelist, function(file) {
+  read.delim(file, comment.char = "#", header = FALSE)})
+
+# If needed, can specify gff files manually and furhter specify sequences within file
+# gff_CS10 <- read.delim("~/Desktop/Matthew_data/Sequence_Alignment/Example_Data/ANNOTATED_SANCTUARY.gff", header = FALSE, comment.char = "#", sep = "\t", stringsAsFactors = FALSE) %>%
+#  filter(V1 %in% c("CS10_Chr08_Sanc"))
+
+# Combine the gffs into one and assign column and gene names
+# Make sure to specify whether using gfflist or individual gff files in list()
+comb_gff<-do.call(rbind, gfflist)
+# comb_gff<-do.call(rbind,  list())
+colnames(comb_gff) <- c("chr","source","type","start","end","dot","strand","dot2","Feature")
+
+# Extract annotation names that in the "Features" column of comb_gff but not given distinct annotation types
+comb_gff <- comb_gff %>%
+ mutate(Name = str_extract(Feature, "Name=[^;]+"),
+         Name = str_replace(Name, "Name=", "")) %>%
+  mutate(type = ifelse(type == "gene" & !is.na(Name), Name, type)) %>%
+  select(-Name)
+
+# Specify gene annotations present within "type" column of comb_gff dataframe for plotting
+# If some of the annotations have slight name variations, can allow these to be recognised as single type
+# Can specify priority, to dictate which of any overlapping annotations are shown over others
+genes<- comb_gff %>%
+  transmute(
+    seq_id=chr,
+    start= start,
+    end = end,
+    strand= strand,
+    feat_id = type)%>%
+filter(feat_id %in% c(
+    "YR", "HET", "ClassII", "NLR", "Patatin-PLP", "TPR-repeat",
+    "ClassI", "DUF3723", "Secondary Metabolite", "DUF3435", "ToxhAT", "primer_bind", "gene", "HP", "IR", "TIR", "HaT_Transposase", "ToxA", "FabD/lysophospholipase-like protein", "Tc5 Transposase", "TPR_12", "Patatin", "TOXA; gene", "TOXA%3B gene"
+  )) %>%
+mutate(
+    feat_id = ifelse(feat_id == "Toxin_ToxA", "ToxA", feat_id),
+    feat_id = ifelse(feat_id == "ToxhAT", "ToxTA", feat_id),
+    feat_id = ifelse(feat_id == "TOXA; gene", "ToxA", feat_id),
+    feat_id = ifelse(feat_id == "TOXA%3B gene", "ToxA", feat_id),
+    feat_id = ifelse(feat_id == "Tc5", "Tc5 Transposase", feat_id),
+    feat_id = ifelse(feat_id == "hp", "HP", feat_id),
+    feat_id = ifelse(feat_id == "ir", "IR", feat_id),
+    feat_id = ifelse(feat_id == "Patatin", "Patatin-PLP", feat_id),
+    feat_id = ifelse(feat_id == "TPR_12", "TPR-repeat", feat_id),
+    priority = case_when(
+      feat_id == "IR" ~ 99,
+      feat_id == "TIR" ~ 90,
+      feat_id == "ToxA" ~ 85,
+      feat_id == "gene" ~ 1,  
+      TRUE ~ 50)
+  ) %>%
+  arrange(priority)
+
+# Read the FASTA file into a seq object, ensure name is changed
+# Inlcude only sequences filtered that link with both Sanctuary and Horizon
+Sanc_seq <- read_seqs("/Users/matthewfraser/Desktop/Matthew_data/Sequence_Alignment/Example_Data/ANNOTATED_SANCTUARY.fasta")
+
+```
+
+# LASTZ Plotting: Aligning Multiple WGS
+```{r}
+# Create bins for each sequence and put into single dataframe
+# This allows to edit order, names, and group multiple sequences in the same bin for adjacent alignment against a single sequence.
+
+# Example 1: Aligning all sequences against each other
+Sanc_bins <- tibble(
+  seq_id = c(
+  "CS10_Chr08_Sanc",
+  "WAI2411_Chr02_Sanc",
+  "WAI2431_Chr07_Sanc",
+  "WAI2432_tig045_chr08_chr07_Sanc",
+  "WAI3285_Chr02_Sanc",
+  "WAI3295_tig122_Sanc",
+  "WAI3382_Chr06_Sanc",
+  "WAI3384_Chr16_Sanc",
+  "WAI3398_Chr04_Sanc")
+) %>%
+  mutate(
+    bin_id = case_when(
+      seq_id == "CS10_Chr08_Sanc"                  ~ "Sanctuary (CS10)",
+      seq_id == "WAI2411_Chr02_Sanc"              ~ "Sanctuary (WAI2411)",
+      seq_id == "WAI2431_Chr07_Sanc"              ~ "Sanctuary (WAI2431)",
+      seq_id == "WAI2432_tig045_chr08_chr07_Sanc"  ~ "Sanctuary (WAI2432)",
+      seq_id == "WAI3285_Chr02_Sanc"              ~ "Sanctuary (WAI3285)",
+      seq_id == "WAI3295_tig122_Sanc"              ~ "Sanctuary (WAI3295)",
+      seq_id == "WAI3382_Chr06_Sanc"              ~ "Sanctuary (WAI3382)",
+      seq_id == "WAI3384_Chr16_Sanc"              ~ "Sanctuary (WAI3384)",
+      seq_id == "WAI3398_Chr04_Sanc"              ~ "Sanctuary (WAI3398)",
+      TRUE ~ seq_id 
+    )
+  ) %>%
+  left_join(Sanc_seq %>% select(seq_id, length), by = "seq_id")
+
+# Arrange bins for specific plotting order
+Sanc_bins_ordered1 <- Sanc_bins %>%
+  mutate(bin_id = factor(bin_id, levels = 
+c("Sanctuary (CS10)", "Sanctuary (WAI2411)", "Sanctuary (WAI2431)", "Sanctuary (WAI2432)", "Sanctuary (WAI3285)", "Sanctuary (WAI3295)", "Sanctuary (WAI3382)", "Sanctuary (WAI3384)", "Sanctuary (WAI3398)"
+)
+)) %>% filter(!is.na(bin_id)) %>%
+  arrange(bin_id)
+
+# Create gggenomes plot using LASTZ links based on % Identity
+lastz_plot <- gggenomes(seqs = Sanc_bins_ordered1, links = filt_lzlinks, genes = genes) + geom_seq() + geom_bin_label(expand_left = .4, size = 4) +
+  geom_link(aes(fill = perc_id), color = NA, alpha = 0.2, linewidth = 1) +
+  scale_fill_distiller(palette = "Spectral", name = "% Identity") +
+  new_scale_fill() +
+  geom_gene(aes(fill = feat_id), color = NA, size = 3) +
+  scale_fill_manual(values = c(
+  "YR" = "maroon","HET" = "skyblue","NLR" = "purple","Patatin-PLP" = "yellow","TPR-repeat" = "darkgreen","ClassII" = "blue","ClassI" = "orange","ToxTA" = "red","Secondary Metabolite" = "#f0e68c","DUF3723" = "#cd653f","DUF3435" = "#29AB87","SDR" = "limegreen","gene" = "grey", "TIR" = "#D1E231", "IR"= "salmon", "HP"= "darkblue", "HaT_Transposase" = "#FE6633", "ToxA" = "turquoise", "FabD/lysophospholipase-like protein" = "beige", "Tc5 Transposase" = "#B8B0FF")) 
+print(lastz_plot)
+
+
+# Example 2: Group multiple sequences into single bin to align different Haplotypes
+Hap1_seqs <- tibble(
+  seq_id     = c("CS10_Chr08_Sanc", "WAI2431_Chr07_Sanc", "WAI3295_tig122_Sanc", "WAI3398_Chr04_Sanc"))
+Hap2_seqs <- tibble(
+  seq_id     = c("WAI3384_Chr16_Sanc"))
+Hap3_seqs <- tibble(
+  seq_id     = c("WAI2411_Chr02_Sanc", "WAI2432_tig045_chr08_chr07_Sanc", "WAI3285_Chr02_Sanc", "WAI3382_Chr06_Sanc"))
+
+
+Hap1_bin <- tibble(
+  bin_id = "Haplotype 1",
+  seq_id = Hap1_seqs$seq_id
+) %>%
+  left_join(Sanc_seq %>% select(seq_id, length), by = "seq_id")
+
+Hap2_bin <- tibble(
+  bin_id = "Haplotype 2",
+  seq_id = Hap2_seqs$seq_id
+) %>%
+  left_join(Sanc_seq %>% select(seq_id, length), by = "seq_id")
+
+Hap3_bin <- tibble(
+  bin_id = "Haplotype 3",
+  seq_id = Hap3_seqs$seq_id
+) %>%
+  left_join(Sanc_seq %>% select(seq_id, length), by = "seq_id")
+
+Hap_bind_ordered1 <- bind_rows(Hap1_bin, Hap2_bin, Hap3_bin) %>%
+  arrange(factor(bin_id, levels = c("Haplotype 3", "Haplotype 1",  "Haplotype 2")))
+
+lastz_plot2 <- gggenomes(seqs = Hap_bind_ordered1, links = filt_lzlinks, genes = genes) + geom_seq() + geom_bin_label(expand_left = .4, size = 4) +
+  geom_link(aes(fill = perc_id), color = NA, alpha = 0.2, linewidth = 1) +
+  scale_fill_distiller(palette = "Spectral", name = "% Identity") +
+  new_scale_fill() +
+  geom_gene(aes(fill = feat_id), color = NA, size = 3) +
+  scale_fill_manual(values = c(
+  "YR" = "maroon","HET" = "skyblue","NLR" = "purple","Patatin-PLP" = "yellow","TPR-repeat" = "darkgreen","ClassII" = "blue","ClassI" = "orange","ToxTA" = "red","Secondary Metabolite" = "#f0e68c","DUF3723" = "#cd653f","DUF3435" = "#29AB87","SDR" = "limegreen","gene" = "grey", "TIR" = "#D1E231", "IR"= "salmon", "HP"= "darkblue", "HaT_Transposase" = "#FE6633", "ToxA" = "turquoise", "FabD/lysophospholipase-like protein" = "beige", "Tc5 Transposase" = "#B8B0FF")) 
+print(lastz_plot2)
+
+# Save the Plot: Specify the plot to save and dimension specifics
+setwd("/Users/matthewfraser/Desktop/Matthew_data/Sequence_Alignment/Example_Data")
+#ggsave("Example_WGs_Alignment.pdf", lastz_plot, width = 30, height = 17, units = "cm")
+```
+
+# LASTZ Plotting: Aligning One Sequence to Multiple Query Sequences
+```{r}
+# Useful if you want to align a subject sequence to many contigs
+# Define the list of query sequences
+Sanc_Query_Seqs <- c("WAI2431_Chr07_Sanc", "WAI3295_tig122_Sanc", "WAI3398_Chr04_Sanc", "WAI3384_Chr16_Sanc", "WAI2411_Chr02_Sanc", "WAI2432_tig045_chr08_chr07_Sanc", "WAI3285_Chr02_Sanc", "WAI3382_Chr06_Sanc")
+
+# Create an empty list that goes through each sequence
+lastz_plots <- list()
+for (Sanc_Q in Sanc_Query_Seqs) {
+  
+  # Create sequence bin featuring Subject and dataframe of all Query Sequences
+  filt_seqs2 <- tibble::tibble(
+    bin_id = c("Sanctuary (CS10)", Sanc_Q),
+    seq_id = c("CS10_Chr08_Sanc", Sanc_Q)
+  ) %>%
+    left_join(Sanc_seq %>% select(seq_id, length), by = "seq_id")
+  
+  # Re-order the bins for display on gggenomes plotting (doesn't show in dataframe)
+  filt_seqs2 %>%
+  arrange(factor(bin_id, levels = c("Sanctuary (CS10)", Sanc_Q)))
+  
+  # Filter links that involve sequences in specific bin
+  filt_lzlinks2 <- filt_lzlinks %>%
+    filter(seq_id %in% filt_seqs2$seq_id | seq_id2 %in% filt_seqs2$seq_id)
+  
+  # Generate gggenomes plot
+  Lastz_plot3<- gggenomes(seqs=filt_seqs2, links=filt_lzlinks2, genes = genes) + geom_seq() + geom_bin_label(expand_left =.4, size=4) + geom_link(aes(fill=perc_id), color=NA, alpha=0.2, linewidth=1) + scale_fill_distiller(palette = "Spectral", name = "% Identity") +  new_scale_fill() + ggtitle(paste("Alignments for Sanctuary (CS10) vs", Sanc_Q)) +  geom_gene(aes(fill = feat_id), color = NA, size = 3) +
+  scale_fill_manual(values = c(
+  "YR" = "maroon","HET" = "skyblue","NLR" = "purple","Patatin-PLP" = "yellow","TPR-repeat" = "darkgreen","ClassII" = "blue","ClassI" = "orange","ToxTA" = "red","Secondary Metabolite" = "#f0e68c","DUF3723" = "#cd653f","DUF3435" = "#29AB87","SDR" = "limegreen","gene" = "grey", "TIR" = "#D1E231", "IR"= "salmon", "HP"= "darkblue", "HaT_Transposase" = "#FE6633", "ToxA" = "turquoise", "FabD/lysophospholipase-like protein" = "beige", "Tc5 Transposase" = "#B8B0FF")) 
+  lastz_plots[[Sanc_Q]] <- Lastz_plot3
+}
+
+# Print plots of all contig alignments
+for (Sanc_Q in names(lastz_plots)) {
+  print(lastz_plots[[Sanc_Q]])
+}
+
+```
+
+# LASTZ Plotting: Zooming into specific section of WGS
+```{r}
+# Specify the sequences to include and their zoom ranges
+Zoomed_Sanc <- tibble(
+  seq_id     = c("CS10_Chr08_Sanc","WAI3295_tig122_Sanc"),
+  zoom_start = c(154546, 154434),
+  zoom_end   = c(168625, 168498)
+) %>%
+  mutate(zoom_length = zoom_end - zoom_start)
+
+# Create bins for each zoomed sequence and put into single dataframe
+CS10_bin <- Zoomed_Sanc %>%
+  filter(seq_id %in% c("CS10_Chr08_Sanc")) %>%
+  transmute(bin_id = "Sanctuary (CS10) ToxTA", seq_id, length = zoom_length)
+
+WAI3295_bin <- Zoomed_Sanc %>%
+  filter(seq_id %in% c("WAI3295_tig122_Sanc")) %>%
+  transmute(bin_id = "Sanctuary (WAI3295) ToxTA", seq_id, length = zoom_length)
+  
+Zoomed_bind_ordered1 <- bind_rows(CS10_bin, WAI3295_bin) %>%
+  arrange(factor(bin_id, levels = c("Sanctuary (CS10) ToxTA", "Sanctuary (WAI3295) ToxTA")))
+
+# Adjust coordinates for each sequence separately
+filt_lzlinks2_zoom <- filt_lzlinks %>%
+  rowwise() %>%
+  mutate(
+    start  = ifelse(seq_id  %in% Zoomed_Sanc$seq_id,
+                    start  - Zoomed_Sanc$zoom_start[Zoomed_Sanc$seq_id == seq_id],
+                    start),
+    end    = ifelse(seq_id  %in% Zoomed_Sanc$seq_id,
+                    end    - Zoomed_Sanc$zoom_start[Zoomed_Sanc$seq_id == seq_id],
+                    end),
+    start2 = ifelse(seq_id2 %in% Zoomed_Sanc$seq_id,
+                    start2 - Zoomed_Sanc$zoom_start[Zoomed_Sanc$seq_id == seq_id2],
+                    start2),
+    end2   = ifelse(seq_id2 %in% Zoomed_Sanc$seq_id,
+                    end2   - Zoomed_Sanc$zoom_start[Zoomed_Sanc$seq_id == seq_id2],
+                    end2)
+  ) %>%
+  ungroup()
+
+# Adjust gene coordinates for zoomed sequences
+genes_zoom <- genes %>%
+  filter(seq_id %in% Zoomed_bind_ordered1$seq_id) %>%
+  left_join(Zoomed_Sanc, by = "seq_id") %>%   # adds zoom_start, zoom_end, zoom_length
+  mutate(
+    start = if_else(!is.na(zoom_start), start - zoom_start, start),
+    end   = if_else(!is.na(zoom_start), end   - zoom_start, end)
+  ) %>%
+  mutate(
+    start = if_else(!is.na(zoom_length), pmax(start, 0), start),
+    end   = if_else(!is.na(zoom_length), pmin(end, zoom_length), end)
+  ) %>%
+  filter(end > start) %>%
+  mutate(feat_id = as.character(feat_id)) %>%
+  select(-zoom_start, -zoom_end, -zoom_length) %>%
+  droplevels()
+  
+view(genes_zoom)
+
+  # Generate gggenomes plot
+  lastz_plot4 <- gggenomes(seqs = Zoomed_bind_ordered1, links = filt_lzlinks2_zoom, genes = genes_zoom) + geom_seq() + geom_bin_label(expand_left = .4, size = 4) +
+    geom_link(aes(fill = perc_id), color = NA, alpha = 0.2, linewidth = 1) +
+    scale_fill_distiller(palette = "Spectral", name = "% Identity") +
+    new_scale_fill() +
+    geom_gene(aes(fill = feat_id), color = NA, size = 3) +
+    scale_fill_manual(values = c( "YR" = "maroon","HET" = "skyblue","NLR" = "purple","Patatin-PLP" = "yellow","TPR-repeat" = "darkgreen","ClassII" = "blue","ClassI" = "orange","ToxTA" = "red","Secondary Metabolite" = "#f0e68c","DUF3723" = "#cd653f","DUF3435" = "#29AB87","SDR" = "limegreen","gene" = "grey", "TIR" = "#D1E231", "IR"= "salmon", "HP"= "darkblue", "HaT_Transposase" = "#FE6633", "ToxA" = "turquoise", "FabD/lysophospholipase-like protein" = "beige", "Tc5 Transposase" = "#B8B0FF")) 
+print(lastz_plot4)
+
+```
