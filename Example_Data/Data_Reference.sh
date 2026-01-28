@@ -1,0 +1,1 @@
+Bucknell A, Wilson HM, Gonçalves dos Santos KC, Simpfendorfer S, Milgate A, Germain H, Solomon PS, Bentham A, McDonald MC.2025.Sanctuary: a Starship transposon facilitating the movement of the virulence factor ToxA in fungal wheat pathogens. mBio16:e01371-25.https://doi.org/10.1128/mbio.01371-25
